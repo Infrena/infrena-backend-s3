@@ -1,0 +1,32 @@
+# The store the live suite runs against.
+#
+# MinIO because it is the S3-compatible store that can be started on a laptop
+# and in CI with one command, and because it honours If-None-Match, which is
+# the header the whole locking design rests on. It is the easiest case rather
+# than a representative one: a backend that only passes here has been tested
+# against the most standards-conformant implementation there is. Task 8's
+# second store is where "S3-compatible" is actually put to the question.
+#
+#   docker compose up -d
+#   go test -tags live -count=1 ./internal/s3backend/
+#   REQUIRE_LIVE_STORE=1 go test -tags live -count=1 ./internal/s3backend/
+#
+# The credentials are the defaults on purpose. This container holds throwaway
+# buckets on a loopback port and nothing else, and a secret that has to be
+# looked up somewhere is a suite people stop running.
+services:
+  minio:
+    image: quay.io/minio/minio:latest
+    container_name: infrena-s3-test
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 2s
+      timeout: 5s
+      retries: 30

@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# build-release VERSION OUTDIR: cross-compile infrena-backend-s3 for every platform plugin.yaml
+# lists, archived under the name the plugin release convention constructs:
+# infrena-backend-s3_<version>_<goos>_<goarch>.tar.gz, and .zip for windows.
+#
+# A BACKEND, so the binary is infrena-backend-<name> rather than infrena-plugin-<name>: that prefix
+# is how internal/backendhost finds it for a `plugin: s3` block. The archive name follows the same
+# convention a provider release uses rather than inventing one, which is why `infrena plugins install`
+# needed no special case for backends when it learned them in 0.10.0 - it builds this name from the
+# BINARY. On 0.8.0 and 0.9.0, whose install knows providers only, these archives are unpacked by hand
+# into the plugin directory instead, which keeps working on every release.
+#
+# PLATFORMS (space-separated GOOS/GOARCH) overrides the manifest's list, so a test can build two
+# platforms instead of eight.
+set -euo pipefail
+# CDPATH makes `cd` echo the directory it landed in, which corrupts both a bare `cd` here and
+# any path captured from one. Clear it rather than quoting around it.
+unset CDPATH
+
+version="${1:?usage: scripts/build-release VERSION OUTDIR}"
+out="${2:?usage: scripts/build-release VERSION OUTDIR}"
+cd "$(dirname "$0")/.."
+mkdir -p "$out"
+out="$(cd "$out" && pwd)"
+
+platforms="${PLATFORMS:-$(sed -n 's/^platforms:[[:space:]]*\[\(.*\)\][[:space:]]*$/\1/p' plugin.yaml | tr ',' ' ')}"
+if [[ -z "${platforms// /}" ]]; then
+  echo "build-release: plugin.yaml has no single-line platforms: [...] list" >&2
+  exit 1
+fi
+
+for platform in $platforms; do
+  goos="${platform%/*}"
+  goarch="${platform#*/}"
+  name="infrena-backend-s3"
+  if [[ "$goos" == windows ]]; then name="$name.exe"; fi
+  goarm=""
+  if [[ "$goarch" == arm ]]; then goarm=7; fi   # still named _linux_arm: the archive name is built from <goos>_<goarch>
+  stem="infrena-backend-s3_${version}_${goos}_${goarch}"
+
+  work="$(mktemp -d)"
+  mkdir "$work/$stem"
+  echo "==> $platform"
+  # CGO_ENABLED=0: a static binary that runs without a matching libc. -trimpath: no build-machine
+  # paths. Not -s -w: a stack trace is the whole diagnostic when a plugin panics.
+  CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" GOARM="$goarm" \
+    go build -trimpath \
+      -ldflags "-X github.com/infrena/infrena-backend-s3/internal/s3backend.Version=${version}" \
+      -o "$work/$stem/$name" ./cmd/infrena-backend-s3
+  cp README.md plugin.yaml "$work/$stem/"
+  if [[ "$goos" == windows ]]; then
+    (cd "$work" && zip -qr "$out/$stem.zip" "$stem")
+  else
+    tar -czf "$out/$stem.tar.gz" -C "$work" "$stem"
+  fi
+  rm -rf "$work"
+done

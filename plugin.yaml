@@ -1,0 +1,33 @@
+# plugin.yaml: what this plugin is, and what it works with.
+# Read at a release TAG, never at the default branch, which describes unreleased code.
+manifest: 2
+name: s3
+version: 0.2.0
+# The BACKEND protocol this release's binary speaks: exactly backendproto.Version of the infrena
+# go.mod requires. It is its own number and not the provider protocol - a change to how resources
+# are described must never oblige a backend to re-release. internal/s3backend's manifest_test.go
+# and scripts/release-check refuse a mismatch.
+protocol: [2]
+platforms: [linux/amd64, linux/arm64, linux/arm, linux/386, darwin/amd64, darwin/arm64, windows/amd64, windows/arm64]
+description: Stores infrena state in an S3-compatible object store, locking with a conditional write.
+# The oldest infrena that can RUN this binary, which is a different question from the version
+# go.mod requires.
+#
+# RAISED TO 0.12.0 ON 2026-09-18, and this one is forced rather than cautious. This release
+# speaks backend protocol 2, and 2 is the first version any engine supports: 0.8.0 through
+# 0.11.1 accept protocol 1 only, so they refuse this binary at the handshake. `Supported` being
+# a SET protects an OLD plugin on a NEW host, which is the direction that matters day to day;
+# it does nothing for a new plugin on an old host, and nothing can.
+#
+# What protocol 2 buys is `validate`: `infrena validate` can now refuse a credential written
+# into a `backend:` block without contacting anything. Worth the floor while this backend is
+# 0.1.0 and the engine is pre-1.0 - which is exactly when a compatibility cost is cheapest to
+# pay, and it gets more expensive every release.
+#
+# The previous note, kept because the reasoning still applies to the NEXT floor decision: go.mod
+# requires more than the binary does, because the live suite imports pkg/backendtest while the
+# shipped binary links only pkg/backend, pkg/backendproto and pkg/backendsdk. A build-time need
+# of the tests is not a runtime need of the binary, and a floor raised for one would refuse a
+# working pairing.
+infrena: ">= 0.14.0"
+source: https://github.com/infrena/infrena-backend-s3

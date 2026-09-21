@@ -1,0 +1,5 @@
+/infrena-backend-s3
+/bin/
+/dist/
+/go.work
+/go.work.sum

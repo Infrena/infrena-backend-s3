@@ -1,0 +1,226 @@
+name: CI
+
+# Three jobs, answering three questions.
+#   pinned  Does this plugin work with the infrena go.mod requires? Builds with GOWORK=off against that
+#           release, runs the unit tests, then runs the LIVE suite and the e2e suite against a MinIO this
+#           job starts. Blocking, and what a release runs.
+#   floor   Does the binary still run against the OLDEST host plugin.yaml admits? The floor is a runtime
+#           claim about hosts, and nothing else in this repository checks it. Blocking, and cheap.
+#   main    Has infrena main broken us? Builds through a workspace against infrena's main. Advisory.
+#
+# REQUIRE_LIVE_STORE=1 IS THE POINT OF THE LIVE STEPS. Both suites skip when there is no store, saying
+# how to start one, and that variable turns the skip into a failure. Without it CI would report green
+# for a backend nothing had run against a store, which is the failure this whole repository was written
+# to avoid.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GOTOOLCHAIN: local
+
+jobs:
+  pinned:
+    name: against the required infrena release
+    runs-on: ubuntu-latest
+    env:
+      GOWORK: "off"
+      # A skipped live suite is a failed one.
+      REQUIRE_LIVE_STORE: "1"
+    steps:
+      # MinIO is started as a STEP, not a `services:` container, and that is not a style
+      # preference. Its entrypoint needs `server /data` as an argument, and a service container
+      # has no way to pass one -- the first CI run failed with "One or more containers failed to
+      # start" for exactly that reason.
+      #
+      # The same image and credentials as docker-compose.yml, so a failure here reproduces with
+      # `docker compose up -d` and nothing else. Throwaway buckets on a loopback port: the default
+      # credentials are deliberate, because a secret that has to be looked up is a suite people
+      # stop running.
+      - name: Start MinIO
+        run: |
+          docker run -d --name minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
+            quay.io/minio/minio:latest server /data
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:9000/minio/health/live >/dev/null 2>&1; then
+              echo "MinIO ready after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "MinIO never became ready"; docker logs minio; exit 1
+      - uses: actions/checkout@v7
+        with:
+          path: infrena-backend-s3
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.27"
+          cache-dependency-path: infrena-backend-s3/go.sum
+      - name: Read the infrena release go.mod requires
+        id: infrena
+        working-directory: infrena-backend-s3
+        run: |
+          set -euo pipefail
+          v="$(go mod edit -json | jq -r '.Require[] | select(.Path == "github.com/infrena/infrena") | .Version')"
+          [[ "$v" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::go.mod requires infrena $v, which is not a release tag"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      # The e2e host, at ../infrena where the suite looks for it, built from the same tag the plugin
+      # compiles against.
+      - uses: actions/checkout@v7
+        with:
+          repository: infrena/infrena
+          ref: ${{ steps.infrena.outputs.version }}
+          path: infrena
+      # The e2e suite drives a real apply, which needs a provider as well as this backend.
+      - uses: actions/checkout@v7
+        with:
+          repository: infrena/infrena-provider-fake
+          path: infrena-provider-fake
+      - name: gofmt
+        working-directory: infrena-backend-s3
+        run: test -z "$(gofmt -l .)"
+      - name: vet
+        working-directory: infrena-backend-s3
+        run: go vet ./... && go vet -tags e2e ./... && go vet -tags live ./...
+      - name: test
+        working-directory: infrena-backend-s3
+        run: go test -count=1 ./...
+      # The live suite is not part of `go test ./...`; it is behind a build tag because it needs a store.
+      # This is the step that proves the backend against something that answers for itself.
+      - name: live against MinIO
+        working-directory: infrena-backend-s3
+        run: go test -tags live -count=1 -v ./internal/s3backend/
+      - name: e2e against infrena ${{ steps.infrena.outputs.version }}
+        working-directory: infrena-backend-s3
+        run: |
+          set -euo pipefail
+          go test -tags e2e -count=1 -v ./e2e/ 2>&1 | tee "$RUNNER_TEMP/e2e.log"
+          if grep -q 'E2E SKIPPED' "$RUNNER_TEMP/e2e.log"; then
+            echo "::error::the e2e suite skipped instead of running against ../infrena"
+            exit 1
+          fi
+
+  floor:
+    name: against the oldest infrena plugin.yaml admits
+    runs-on: ubuntu-latest
+    env:
+      GOWORK: "off"
+      REQUIRE_LIVE_STORE: "1"
+    steps:
+      # MinIO is started as a STEP, not a `services:` container, and that is not a style
+      # preference. Its entrypoint needs `server /data` as an argument, and a service container
+      # has no way to pass one -- the first CI run failed with "One or more containers failed to
+      # start" for exactly that reason.
+      #
+      # The same image and credentials as docker-compose.yml, so a failure here reproduces with
+      # `docker compose up -d` and nothing else. Throwaway buckets on a loopback port: the default
+      # credentials are deliberate, because a secret that has to be looked up is a suite people
+      # stop running.
+      - name: Start MinIO
+        run: |
+          docker run -d --name minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
+            quay.io/minio/minio:latest server /data
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:9000/minio/health/live >/dev/null 2>&1; then
+              echo "MinIO ready after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "MinIO never became ready"; docker logs minio; exit 1
+      - uses: actions/checkout@v7
+        with:
+          path: infrena-backend-s3
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.27"
+          cache-dependency-path: infrena-backend-s3/go.sum
+      # plugin.yaml's `infrena:` floor is the oldest HOST that can run this binary, which is a different
+      # claim from go.mod's build-time require and is not checked by building. It is checked by running:
+      # the e2e suite drives this plugin through a host built from the floor release.
+      - name: Read plugin.yaml's floor
+        id: floor
+        working-directory: infrena-backend-s3
+        run: |
+          set -euo pipefail
+          v="$(sed -n 's/^infrena:[[:space:]]*//p' plugin.yaml | tr -d "\"' \r" | sed 's/^>=//')"
+          [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::plugin.yaml's infrena: floor is '$v', which is not a >= VERSION this job can check out"; exit 1; }
+          echo "version=v$v" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+        with:
+          repository: infrena/infrena
+          ref: ${{ steps.floor.outputs.version }}
+          path: infrena
+      - uses: actions/checkout@v7
+        with:
+          repository: infrena/infrena-provider-fake
+          path: infrena-provider-fake
+      - name: e2e against infrena ${{ steps.floor.outputs.version }}
+        working-directory: infrena-backend-s3
+        run: |
+          set -euo pipefail
+          go test -tags e2e -count=1 -v ./e2e/ 2>&1 | tee "$RUNNER_TEMP/e2e.log"
+          if grep -q 'E2E SKIPPED' "$RUNNER_TEMP/e2e.log"; then
+            echo "::error::the e2e suite skipped instead of running against the floor release, so the floor is unproven"
+            exit 1
+          fi
+
+  main:
+    name: against infrena main (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    env:
+      REQUIRE_LIVE_STORE: "1"
+    steps:
+      # MinIO is started as a STEP, not a `services:` container, and that is not a style
+      # preference. Its entrypoint needs `server /data` as an argument, and a service container
+      # has no way to pass one -- the first CI run failed with "One or more containers failed to
+      # start" for exactly that reason.
+      #
+      # The same image and credentials as docker-compose.yml, so a failure here reproduces with
+      # `docker compose up -d` and nothing else. Throwaway buckets on a loopback port: the default
+      # credentials are deliberate, because a secret that has to be looked up is a suite people
+      # stop running.
+      - name: Start MinIO
+        run: |
+          docker run -d --name minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
+            quay.io/minio/minio:latest server /data
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:9000/minio/health/live >/dev/null 2>&1; then
+              echo "MinIO ready after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "MinIO never became ready"; docker logs minio; exit 1
+      - uses: actions/checkout@v7
+        with:
+          path: infrena-backend-s3
+      - uses: actions/checkout@v7
+        with:
+          repository: infrena/infrena
+          path: infrena
+      - uses: actions/checkout@v7
+        with:
+          repository: infrena/infrena-provider-fake
+          path: infrena-provider-fake
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.27"
+          cache-dependency-path: infrena-backend-s3/go.sum
+      - name: test, live and e2e against infrena main
+        working-directory: infrena-backend-s3
+        run: |
+          set -euo pipefail
+          go work init . ../infrena
+          go test -count=1 ./...
+          go test -tags live -count=1 ./internal/s3backend/
+          go test -tags e2e -count=1 -v ./e2e/ 2>&1 | tee "$RUNNER_TEMP/e2e.log"
+          if grep -q 'E2E SKIPPED' "$RUNNER_TEMP/e2e.log"; then exit 1; fi

@@ -1,0 +1,33 @@
+project: s3-backend-e2e
+
+# THE POINT OF THIS FIXTURE. `plugin: s3` is the only key infrena reads here;
+# everything below it crosses to this backend untouched and is parsed by
+# internal/s3backend's ParseConfig. BUCKET, ENDPOINT and REGION are rewritten
+# per run, because the bucket is made and destroyed by the suite.
+backend:
+  plugin: s3
+  bucket: BUCKET
+  endpoint: ENDPOINT
+  region: REGION
+  path: /infrena/
+
+environments:
+  dev: {}
+
+# The fake provider's cloud is a JSON file in .infrena/, so the only thing this
+# project needs a network for is its state — which is the whole point.
+resources:
+  network:
+    type: fake.network
+    cidr: 10.0.0.0/16
+
+  db:
+    type: fake.database
+    engine: postgres
+    password: hunter2
+    network: ${network.id}
+
+  app:
+    type: fake.application
+    image: nginx:1.27
+    database_url: ${db.endpoint}

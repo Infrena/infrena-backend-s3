@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# release-check TAG: refuse to release unless the git tag, plugin.yaml's version and the version the
+# built binary reports all agree, and plugin.yaml's protocol: is exactly the backend protocol version
+# the binary's handshake announces. The manifest is authoritative and the binary secondary; this
+# check is what blocks a release where they disagree.
+#
+# BACKEND protocol, not the provider one. backendproto has its own version and they move for
+# unrelated reasons, so this reads the number out of THIS binary's handshake rather than out of
+# anything a provider would report.
+#
+# PLUGIN_VERSION_SYMBOL overrides the -ldflags -X target. It exists so a test can simulate the
+# variable being renamed, which `go build -X` otherwise ignores in silence.
+#
+# PLUGIN_MANIFEST overrides the manifest path (default plugin.yaml, relative to the repo root).
+set -euo pipefail
+# CDPATH makes `cd` echo the directory it landed in, which corrupts both a bare `cd` here and
+# any path captured from one. Clear it rather than quoting around it.
+unset CDPATH
+
+tag="${1:?usage: scripts/release-check vMAJOR.MINOR.PATCH}"
+version="${tag#v}"
+if [[ "$tag" != v* || ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "release-check: tag '$tag' is not vMAJOR.MINOR.PATCH" >&2
+  exit 1
+fi
+
+cd "$(dirname "$0")/.."
+manifest="${PLUGIN_MANIFEST:-plugin.yaml}"
+
+manifest_version="$(sed -n 's/^version:[[:space:]]*//p' "$manifest" | tr -d "\"' \r")"
+if [[ -z "$manifest_version" ]]; then
+  echo "release-check: $manifest has no top-level version: line" >&2
+  exit 1
+fi
+if [[ "$manifest_version" != "$version" ]]; then
+  echo "release-check: tag $tag names version $version, but $manifest says $manifest_version" >&2
+  exit 1
+fi
+
+symbol="${PLUGIN_VERSION_SYMBOL:-github.com/infrena/infrena-backend-s3/internal/s3backend.Version}"
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+CGO_ENABLED=0 go build -trimpath -ldflags "-X ${symbol}=${version}" -o "$work/infrena-backend-s3" ./cmd/infrena-backend-s3
+
+# The binary refuses to start without the host's cookie. With it and an empty stdin, it writes its
+# handshake {"protocol","name","version"} and exits. Captured whole, not piped to head, so pipefail
+# cannot turn an early-closed pipe into a false failure.
+out="$(INFRENA_PLUGIN_COOKIE=release-check "$work/infrena-backend-s3" </dev/null 2>/dev/null)"
+handshake="${out%%$'\n'*}"
+reported="$(printf '%s' "$handshake" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p')"
+if [[ "$reported" != "$version" ]]; then
+  echo "release-check: the binary reports version '${reported}', not $version (handshake: $handshake)" >&2
+  echo "The -ldflags symbol ${symbol} does not set internal/s3backend.Version; every archive would report the wrong version." >&2
+  exit 1
+fi
+
+# protocol: is the versions THIS release's binary speaks. Compared with whitespace stripped, so
+# `[1]` and `[ 1 ]` agree and `[1, 0]` does not.
+manifest_protocol="$(sed -n 's/^protocol:[[:space:]]*//p' "$manifest" | sed 's/[[:space:]]*#.*//' | tr -d " \r")"
+spoken="$(printf '%s' "$handshake" | sed -n 's/.*"protocol":\([0-9][0-9]*\).*/\1/p')"
+if [[ -z "$spoken" ]]; then
+  echo "release-check: the binary's handshake carries no protocol version (handshake: $handshake)" >&2
+  exit 1
+fi
+if [[ "$manifest_protocol" != "[$spoken]" ]]; then
+  echo "release-check: $manifest says protocol: ${manifest_protocol:-<missing>}, but the binary speaks backend protocol $spoken, so it must say [$spoken]" >&2
+  echo "protocol: changes in the same commit as go.mod's infrena require." >&2
+  exit 1
+fi
+echo "release-check: tag, plugin.yaml and binary all say $version, and speak backend protocol [$spoken]"
