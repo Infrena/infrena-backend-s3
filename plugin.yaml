@@ -2,7 +2,7 @@
 # Read at a release TAG, never at the default branch, which describes unreleased code.
 manifest: 2
 name: s3
-version: 0.2.0
+version: 0.2.1
 # The BACKEND protocol this release's binary speaks: exactly backendproto.Version of the infrena
 # go.mod requires. It is its own number and not the provider protocol - a change to how resources
 # are described must never oblige a backend to re-release. internal/s3backend's manifest_test.go
